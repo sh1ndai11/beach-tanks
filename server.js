@@ -10,7 +10,7 @@ const SPEED = 190, REVERSE = 0.6, TURN = 3.3;  // px/s, reverse multiplier, rad/
 const BULLET_SPEED = 560, BULLET_LIFE = 1.3;
 const COOLDOWN = 0.45, MAX_HP = 3, RESPAWN = 3;
 const TICK = 1 / 60, SEND_EVERY = 2;           // 60 Hz sim, 30 Hz network
-const MIN_TANKS = 4;                           // bots fill the arena up to this many tanks
+const MIN_TANKS = 0;                           // bots fill the arena up to this many tanks (0 = no bots)
 const BOT_NAMES = ['Краб', 'Чайка', 'Пират', 'Волна', 'Акула', 'Пальма', 'Медуза', 'Дельфин'];
 
 // Cover on the beach: crates, sandbags, rocks (axis-aligned rectangles)
