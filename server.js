@@ -6,9 +6,12 @@ const { WebSocketServer } = require('ws');
 const PORT = process.env.PORT || 3000;
 const W = 1200, H = 800, WATER = 50;          // map size, water border width
 const R = 18;                                  // tank radius
-const SPEED = 190, BULLET_SPEED = 560, BULLET_LIFE = 1.3;
+const SPEED = 190, REVERSE = 0.6, TURN = 3.3;  // px/s, reverse multiplier, rad/s
+const BULLET_SPEED = 560, BULLET_LIFE = 1.3;
 const COOLDOWN = 0.45, MAX_HP = 3, RESPAWN = 3;
 const TICK = 1 / 60, SEND_EVERY = 2;           // 60 Hz sim, 30 Hz network
+const MIN_TANKS = 4;                           // bots fill the arena up to this many tanks
+const BOT_NAMES = ['Краб', 'Чайка', 'Пират', 'Волна', 'Акула', 'Пальма', 'Медуза', 'Дельфин'];
 
 // Cover on the beach: crates, sandbags, rocks (axis-aligned rectangles)
 const OBSTACLES = [
@@ -29,8 +32,9 @@ const OBSTACLES = [
 
 const COLORS = ['#ff5a5a', '#4da3ff', '#ffd23f', '#a76bff', '#39d98a', '#ff8f3f', '#ff6bd6', '#3fe0e0'];
 
-const players = new Map();   // id -> player
+const players = new Map();   // id -> player (humans and bots)
 let bullets = [];
+let fxQueue = [];
 let nextId = 1, tickCount = 0;
 
 // ---------- geometry ----------
@@ -44,6 +48,16 @@ function blocked(x, y, r) {
   if (x - r < WATER || y - r < WATER || x + r > W - WATER || y + r > H - WATER) return true;
   return OBSTACLES.some(o => circleHitsRect(x, y, r, o));
 }
+function lineClear(x1, y1, x2, y2) {
+  const d = Math.hypot(x2 - x1, y2 - y1), n = Math.ceil(d / 12);
+  for (let i = 1; i < n; i++) {
+    const t = i / n;
+    const x = x1 + (x2 - x1) * t, y = y1 + (y2 - y1) * t;
+    if (OBSTACLES.some(o => x > o.x && x < o.x + o.w && y > o.y && y < o.y + o.h)) return false;
+  }
+  return true;
+}
+function normAngle(a) { while (a > Math.PI) a -= 2 * Math.PI; while (a < -Math.PI) a += 2 * Math.PI; return a; }
 function spawnPoint() {
   for (let i = 0; i < 100; i++) {
     const x = WATER + 40 + Math.random() * (W - 2 * WATER - 80);
@@ -58,21 +72,78 @@ function spawnPoint() {
   return { x: W / 2, y: 120 };
 }
 
-// ---------- game state ----------
-function addPlayer(ws, name) {
+// ---------- players & bots ----------
+function makeTank(name, ws, bot) {
   const id = nextId++;
   const used = new Set([...players.values()].map(p => p.color));
   const color = COLORS.find(c => !used.has(c)) || COLORS[id % COLORS.length];
   const sp = spawnPoint();
   const p = {
-    id, ws, color, name: name || 'Игрок ' + id,
-    x: sp.x, y: sp.y, a: 0, hp: MAX_HP, dead: false, respawnAt: 0,
+    id, ws, bot, color, name,
+    x: sp.x, y: sp.y, a: Math.random() * Math.PI * 2, hp: MAX_HP, dead: false, respawnAt: 0,
     kills: 0, deaths: 0, cd: 0, input: { w: 0, a: 0, s: 0, d: 0, fire: 0 },
+    ai: { evadeT: 0, evadeDir: 1, back: 0, checkT: 0, lx: sp.x, ly: sp.y },
   };
   players.set(id, p);
   return p;
 }
 
+function balanceBots() {
+  const humans = [...players.values()].filter(p => !p.bot).length;
+  const bots = [...players.values()].filter(p => p.bot);
+  const want = humans === 0 ? 0 : Math.max(0, MIN_TANKS - humans);
+  while (bots.length > want) {
+    const b = bots.pop();
+    players.delete(b.id);
+    bullets = bullets.filter(x => x.owner !== b.id);
+  }
+  while (bots.length < want) {
+    const taken = new Set([...players.values()].map(p => p.name));
+    const name = BOT_NAMES.find(n => !taken.has('🤖 ' + n)) || 'Бот';
+    bots.push(makeTank('🤖 ' + name, null, true));
+  }
+}
+
+function botThink(b) {
+  const ai = b.ai, i = b.input;
+  if (b.dead) { i.w = i.a = i.s = i.d = i.fire = 0; return; }
+  // nearest living enemy
+  let t = null, best = Infinity;
+  for (const q of players.values()) {
+    if (q === b || q.dead) continue;
+    const d = Math.hypot(q.x - b.x, q.y - b.y);
+    if (d < best) { best = d; t = q; }
+  }
+  i.w = i.a = i.s = i.d = i.fire = 0;
+
+  // stuck detection: wanted to move but barely did
+  ai.checkT += 1 / 30;
+  if (ai.checkT >= 0.6) {
+    if (Math.hypot(b.x - ai.lx, b.y - ai.ly) < 8 && ai.evadeT <= 0) {
+      ai.evadeT = 0.8; ai.back = 0.35; ai.evadeDir = Math.random() < 0.5 ? -1 : 1;
+    }
+    ai.lx = b.x; ai.ly = b.y; ai.checkT = 0;
+  }
+
+  const probe = !blocked(b.x + Math.cos(b.a) * 40, b.y + Math.sin(b.a) * 40, R);
+  if (ai.evadeT > 0) {
+    ai.evadeT -= 1 / 30; ai.back -= 1 / 30;
+    if (ai.back > 0) i.s = 1; else if (probe) i.w = 1;
+    if (ai.evadeDir > 0) i.d = 1; else i.a = 1;
+    return;
+  }
+  if (!probe) { ai.evadeT = 0.5; ai.evadeDir = Math.random() < 0.5 ? -1 : 1; return; }
+  if (!t) { i.w = 1; return; }
+
+  const diff = normAngle(Math.atan2(t.y - b.y, t.x - b.x) - b.a);
+  if (diff > 0.12) i.d = 1; else if (diff < -0.12) i.a = 1;
+  const los = lineClear(b.x, b.y, t.x, t.y);
+  if (los && best < 150) i.s = 1;                       // too close: back off
+  else if (!los || best > 280) { if (Math.abs(diff) < 1.2) i.w = 1; }   // approach / go around
+  if (los && Math.abs(diff) < 0.22 && best < 650 && Math.random() < 0.85) i.fire = 1;
+}
+
+// ---------- simulation ----------
 function update(dt) {
   for (const p of players.values()) {
     if (p.dead) {
@@ -83,53 +154,52 @@ function update(dt) {
       continue;
     }
     const i = p.input;
-    let dx = (i.d ? 1 : 0) - (i.a ? 1 : 0);
-    let dy = (i.s ? 1 : 0) - (i.w ? 1 : 0);
-    if (dx || dy) {
-      p.a = Math.atan2(dy, dx);
-      const len = Math.hypot(dx, dy);
-      const mx = (dx / len) * SPEED * dt, my = (dy / len) * SPEED * dt;
-      // move per-axis so tanks slide along walls
+    // tank controls: A/D rotate the hull, W/S drive forward/back
+    p.a = normAngle(p.a + ((i.d ? 1 : 0) - (i.a ? 1 : 0)) * TURN * dt);
+    const drive = (i.w ? 1 : 0) - (i.s ? 1 : 0);
+    if (drive) {
+      const sp = SPEED * (drive > 0 ? 1 : REVERSE) * dt * drive;
+      const mx = Math.cos(p.a) * sp, my = Math.sin(p.a) * sp;
+      // per-axis so tanks slide along walls
       if (!blocked(p.x + mx, p.y, R)) p.x += mx;
       if (!blocked(p.x, p.y + my, R)) p.y += my;
-      // tanks can't drive through each other
-      for (const q of players.values()) {
-        if (q === p || q.dead) continue;
-        const d = Math.hypot(p.x - q.x, p.y - q.y);
-        if (d < R * 2 && d > 0) {
-          const push = (R * 2 - d) / d;
-          const nx = p.x + (p.x - q.x) * push, ny = p.y + (p.y - q.y) * push;
-          if (!blocked(nx, ny, R)) { p.x = nx; p.y = ny; }
-        }
+    }
+    // tanks can't drive through each other
+    for (const q of players.values()) {
+      if (q === p || q.dead) continue;
+      const d = Math.hypot(p.x - q.x, p.y - q.y);
+      if (d < R * 2 && d > 0) {
+        const push = (R * 2 - d) / d / 2;
+        const nx = p.x + (p.x - q.x) * push, ny = p.y + (p.y - q.y) * push;
+        if (!blocked(nx, ny, R)) { p.x = nx; p.y = ny; }
       }
     }
     p.cd = Math.max(0, p.cd - dt);
     if (i.fire && p.cd === 0) {
       p.cd = COOLDOWN;
-      bullets.push({
-        owner: p.id,
-        x: p.x + Math.cos(p.a) * (R + 6), y: p.y + Math.sin(p.a) * (R + 6),
-        vx: Math.cos(p.a) * BULLET_SPEED, vy: Math.sin(p.a) * BULLET_SPEED, life: BULLET_LIFE,
-      });
+      const mx = p.x + Math.cos(p.a) * (R + 6), my = p.y + Math.sin(p.a) * (R + 6);
+      bullets.push({ owner: p.id, x: mx, y: my, vx: Math.cos(p.a) * BULLET_SPEED, vy: Math.sin(p.a) * BULLET_SPEED, life: BULLET_LIFE });
+      fxQueue.push({ k: 'shot', x: Math.round(mx), y: Math.round(my), a: +p.a.toFixed(2) });
     }
   }
 
   const alive = [];
   for (const b of bullets) {
-    // sub-step so fast bullets don't skip through thin walls
     let dead = false;
-    for (let s = 0; s < 3 && !dead; s++) {
+    for (let s = 0; s < 3 && !dead; s++) {          // sub-step so fast bullets don't tunnel
       b.x += (b.vx * dt) / 3; b.y += (b.vy * dt) / 3;
-      if (blocked(b.x, b.y, 3)) { dead = true; break; }
+      if (blocked(b.x, b.y, 3)) { dead = true; fxQueue.push({ k: 'wall', x: Math.round(b.x), y: Math.round(b.y) }); break; }
       for (const p of players.values()) {
         if (p.dead || p.id === b.owner) continue;
         if (Math.hypot(p.x - b.x, p.y - b.y) < R + 3) {
           dead = true;
           p.hp--;
+          fxQueue.push({ k: 'hit', x: Math.round(b.x), y: Math.round(b.y), id: p.id });
           if (p.hp <= 0) {
             p.dead = true; p.deaths++; p.respawnAt = Date.now() + RESPAWN * 1000;
             const killer = players.get(b.owner);
             if (killer) killer.kills++;
+            fxQueue.push({ k: 'boom', x: Math.round(p.x), y: Math.round(p.y), c: p.color });
             broadcast({ type: 'kill', killer: killer ? killer.name : '?', victim: p.name });
           }
           break;
@@ -143,22 +213,25 @@ function update(dt) {
 }
 
 // ---------- network ----------
-function send(ws, msg) { if (ws.readyState === 1) ws.send(JSON.stringify(msg)); }
-function broadcast(msg) { for (const p of players.values()) send(p.ws, msg); }
+function send(ws, msg) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(msg)); }
+function broadcast(msg) { for (const p of players.values()) if (!p.bot) send(p.ws, msg); }
 
 function snapshot() {
-  return {
+  const s = {
     type: 'state',
-    t: Date.now(),
     players: [...players.values()].map(p => ({
       id: p.id, name: p.name, color: p.color, x: Math.round(p.x), y: Math.round(p.y),
-      a: +p.a.toFixed(2), hp: p.hp, dead: p.dead, kills: p.kills, deaths: p.deaths,
+      a: +p.a.toFixed(2), hp: p.hp, dead: p.dead, kills: p.kills, deaths: p.deaths, bot: p.bot,
     })),
-    bullets: bullets.map(b => ({ x: Math.round(b.x), y: Math.round(b.y), o: b.owner })),
+    bullets: bullets.map(b => ({ x: Math.round(b.x), y: Math.round(b.y), vx: Math.round(b.vx), vy: Math.round(b.vy) })),
+    fx: fxQueue,
   };
+  fxQueue = [];
+  return s;
 }
 
 setInterval(() => {
+  if (tickCount % 2 === 0) for (const p of players.values()) if (p.bot) botThink(p);
   update(TICK);
   if (++tickCount % SEND_EVERY === 0 && players.size) broadcast(snapshot());
 }, TICK * 1000);
@@ -172,7 +245,7 @@ const server = http.createServer((req, res) => {
   if (!full.startsWith(path.join(__dirname, 'public'))) { res.writeHead(403); return res.end(); }
   fs.readFile(full, (err, data) => {
     if (err) { res.writeHead(404); return res.end('Not found'); }
-    res.writeHead(200, { 'Content-Type': MIME[path.extname(full)] || 'application/octet-stream' });
+    res.writeHead(200, { 'Content-Type': MIME[path.extname(full)] || 'application/octet-stream', 'Cache-Control': 'no-cache' });
     res.end(data);
   });
 });
@@ -184,10 +257,12 @@ wss.on('connection', ws => {
     let m;
     try { m = JSON.parse(raw); } catch { return; }
     if (m.type === 'join' && !me) {
-      if (players.size >= 12) return send(ws, { type: 'full' });
+      if ([...players.values()].filter(p => !p.bot).length >= 12) return send(ws, { type: 'full' });
       const name = String(m.name || '').replace(/[<>]/g, '').trim().slice(0, 14);
-      me = addPlayer(ws, name);
-      send(ws, { type: 'init', id: me.id, W, H, WATER, R, obstacles: OBSTACLES });
+      // make room for the newcomer by removing a bot first
+      me = makeTank(name || 'Игрок', ws, false);
+      balanceBots();
+      send(ws, { type: 'init', id: me.id, W, H, WATER, R, SPEED, REVERSE, TURN, obstacles: OBSTACLES });
       broadcast({ type: 'info', text: me.name + ' вошёл в бой' });
     } else if (m.type === 'input' && me) {
       me.input = { w: +!!m.w, a: +!!m.a, s: +!!m.s, d: +!!m.d, fire: +!!m.fire };
@@ -197,6 +272,7 @@ wss.on('connection', ws => {
     if (!me) return;
     players.delete(me.id);
     bullets = bullets.filter(b => b.owner !== me.id);
+    balanceBots();
     broadcast({ type: 'info', text: me.name + ' вышел' });
   });
   ws.on('error', () => {});

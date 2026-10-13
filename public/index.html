@@ -43,15 +43,17 @@
     <input id="name" maxlength="14" placeholder="Твой ник" autocomplete="off">
     <button id="go">В БОЙ</button>
     <div id="err"></div>
-    <div class="help"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> — движение<br><kbd>Пробел</kbd> — огонь<br>3 попадания — и танк уничтожен</div>
+    <div class="help"><kbd>W</kbd><kbd>S</kbd> — вперёд / назад<br><kbd>A</kbd><kbd>D</kbd> — поворот танка<br><kbd>Пробел</kbd> — огонь<br>3 попадания — и танк уничтожен</div>
   </div>
 </div>
 
 <script>
 const cv = document.getElementById('c'), ctx = cv.getContext('2d');
 const $ = id => document.getElementById(id);
-let ws, me = null, map = null, players = [], bullets = [], view = {}, scale = 1, ox = 0, oy = 0;
-const smooth = new Map();                        // id -> {x,y,a} rendered pose
+let ws, me = null, map = null, players = [], bullets = [], scale = 1, ox = 0, oy = 0;
+let bulletsAt = 0, pred = null, shake = 0;
+const smooth = new Map();                        // id -> {x,y,a} rendered pose of other tanks
+let particles = [], tracks = [], flashes = [];
 const keys = { w: 0, a: 0, s: 0, d: 0, fire: 0 };
 $('name').value = localStorage.getItem('tankName') || '';
 
@@ -75,7 +77,10 @@ function connect() {
   ws.onmessage = e => {
     const m = JSON.parse(e.data);
     if (m.type === 'init') { me = m.id; map = m; $('menu').style.display = 'none'; resize(); }
-    else if (m.type === 'state') { players = m.players; bullets = m.bullets; updateHud(); }
+    else if (m.type === 'state') {
+      players = m.players; bullets = m.bullets; bulletsAt = performance.now();
+      m.fx.forEach(handleFx); updateHud();
+    }
     else if (m.type === 'kill') feed('💥 ' + m.killer + ' уничтожил ' + m.victim);
     else if (m.type === 'info') feed(m.text);
     else if (m.type === 'full') $('err').textContent = 'Сервер заполнен, попробуй позже';
@@ -196,30 +201,148 @@ function drawTank(p, s) {
   ctx.fillStyle = p.hp > 1 ? '#5cf08a' : '#ff5a5a'; ctx.fillRect(s.x - 20, s.y - 29, 40 * p.hp / 3, 5);
 }
 
+// ---------- effects ----------
+function puff(x, y, n, o) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * 6.283, v = (o.v || 2) * (.3 + Math.random());
+    particles.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 1, dec: o.dec || .04, size: o.size || 3, grow: o.grow || 0, color: o.color, glow: o.glow });
+  }
+}
+function handleFx(f) {
+  if (f.k === 'shot') {
+    flashes.push({ x: f.x, y: f.y, a: f.a, life: 1 });
+    puff(f.x, f.y, 5, { v: 2.5, size: 2.5, color: '255,200,80', dec: .09, glow: true });
+    puff(f.x, f.y, 3, { v: .8, size: 5, grow: .25, color: '200,200,200', dec: .03 });
+  } else if (f.k === 'wall') {
+    puff(f.x, f.y, 8, { v: 3, size: 2.5, color: '230,200,140', dec: .06 });
+  } else if (f.k === 'hit') {
+    puff(f.x, f.y, 10, { v: 4, size: 2.5, color: '255,160,40', dec: .06, glow: true });
+    if (f.id === me) shake = Math.max(shake, 9);
+  } else if (f.k === 'boom') {
+    puff(f.x, f.y, 26, { v: 6, size: 3.5, color: '255,150,30', dec: .03, glow: true });
+    puff(f.x, f.y, 14, { v: 3, size: 8, grow: .6, color: '60,60,60', dec: .015 });
+    puff(f.x, f.y, 10, { v: 2, size: 4, color: f.c.replace('#', ''), dec: .025 });
+    particles.push({ x: f.x, y: f.y, vx: 0, vy: 0, life: 1, dec: .05, size: 10, grow: 5, ring: true });
+    shake = Math.max(shake, Math.hypot(f.x - (pred ? pred.x : 0), f.y - (pred ? pred.y : 0)) < 400 ? 14 : 5);
+  }
+}
+function colorToRgb(c) {   // 'rrggbb' -> 'r,g,b' (puff color for boom debris)
+  return /^[0-9a-f]{6}$/i.test(c) ? [0, 2, 4].map(i => parseInt(c.substr(i, 2), 16)).join(',') : c;
+}
+
+function drawFx(dt60) {
+  // tracks
+  for (const t of tracks) {
+    t.life -= .004 * dt60;
+    ctx.save(); ctx.translate(t.x, t.y); ctx.rotate(t.a);
+    ctx.fillStyle = `rgba(110,85,45,${Math.max(t.life, 0) * .45})`;
+    ctx.fillRect(-4, -17, 8, 5); ctx.fillRect(-4, 12, 8, 5);
+    ctx.restore();
+  }
+  tracks = tracks.filter(t => t.life > 0);
+}
+function drawParticles(dt60) {
+  for (const p of particles) {
+    p.x += p.vx * dt60; p.y += p.vy * dt60; p.vx *= .96; p.vy *= .96;
+    p.life -= p.dec * dt60; p.size += p.grow * dt60;
+    if (p.life <= 0) continue;
+    if (p.ring) {
+      ctx.strokeStyle = `rgba(255,220,120,${p.life})`; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, 7); ctx.stroke();
+      continue;
+    }
+    ctx.fillStyle = `rgba(${colorToRgb(p.color)},${p.life * (p.grow ? .55 : 1)})`;
+    if (p.glow) { ctx.shadowColor = `rgb(${p.color})`; ctx.shadowBlur = 10; }
+    ctx.beginPath(); ctx.arc(p.x, p.y, Math.max(p.size * (p.grow ? 1 : p.life), .5), 0, 7); ctx.fill();
+    ctx.shadowBlur = 0;
+  }
+  particles = particles.filter(p => p.life > 0);
+  for (const f of flashes) {
+    f.life -= .15 * dt60;
+    if (f.life <= 0) continue;
+    ctx.save(); ctx.translate(f.x, f.y); ctx.rotate(f.a);
+    ctx.fillStyle = `rgba(255,230,120,${f.life})`; ctx.shadowColor = '#ffb300'; ctx.shadowBlur = 18;
+    ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(18 * f.life + 6, -7 * f.life); ctx.lineTo(18 * f.life + 6, 7 * f.life); ctx.fill();
+    ctx.restore();
+  }
+  flashes = flashes.filter(f => f.life > 0);
+}
+
+// ---------- own-tank prediction (responsive controls) ----------
+function blockedLocal(x, y, r) {
+  if (x - r < map.WATER || y - r < map.WATER || x + r > map.W - map.WATER || y + r > map.H - map.WATER) return true;
+  return map.obstacles.some(o => {
+    const nx = Math.max(o.x, Math.min(x, o.x + o.w)), ny = Math.max(o.y, Math.min(y, o.y + o.h));
+    return (x - nx) ** 2 + (y - ny) ** 2 < r * r;
+  });
+}
+function normA(a) { while (a > Math.PI) a -= 2 * Math.PI; while (a < -Math.PI) a += 2 * Math.PI; return a; }
+function stepPred(dt, srv) {
+  if (!pred || srv.dead) { pred = { x: srv.x, y: srv.y, a: srv.a }; return; }
+  pred.a = normA(pred.a + (keys.d - keys.a) * map.TURN * dt);
+  const drive = keys.w - keys.s;
+  if (drive) {
+    const sp = map.SPEED * (drive > 0 ? 1 : map.REVERSE) * dt * drive;
+    const mx = Math.cos(pred.a) * sp, my = Math.sin(pred.a) * sp;
+    if (!blockedLocal(pred.x + mx, pred.y, map.R)) pred.x += mx;
+    if (!blockedLocal(pred.x, pred.y + my, map.R)) pred.y += my;
+  }
+  // gently pull toward the authoritative server state
+  const err = Math.hypot(srv.x - pred.x, srv.y - pred.y);
+  if (err > 70) { pred.x = srv.x; pred.y = srv.y; return; }
+  const moving = drive || keys.a || keys.d;
+  const k = (moving ? (err > 30 ? .08 : .02) : .2);
+  pred.x += (srv.x - pred.x) * k; pred.y += (srv.y - pred.y) * k;
+  if (!moving) pred.a += normA(srv.a - pred.a) * .2;
+}
+
+let lastT = performance.now(), smokeT = 0;
 function frame(t) {
   requestAnimationFrame(frame);
+  const dt = Math.min((t - lastT) / 1000, .1); lastT = t;
+  const dt60 = dt * 60;
   ctx.fillStyle = '#0b1f2e'; ctx.fillRect(0, 0, cv.width, cv.height);
   if (!map) return;
   if (!deco.length) makeDeco();
+  const mine = players.find(p => p.id === me);
+  if (mine) stepPred(dt, mine);
+
   ctx.save(); ctx.translate(ox, oy); ctx.scale(scale, scale);
+  if (shake > .3) { ctx.translate((Math.random() - .5) * shake, (Math.random() - .5) * shake); shake *= Math.pow(.9, dt60); }
   drawBeach(t);
+  drawFx(dt60);
   map.obstacles.forEach(drawObstacle);
-  // smooth toward server positions
+
   const ids = new Set();
+  smokeT += dt;
   for (const p of players) {
     ids.add(p.id);
     let s = smooth.get(p.id);
-    if (!s || Math.hypot(s.x - p.x, s.y - p.y) > 120) { s = { x: p.x, y: p.y, a: p.a }; smooth.set(p.id, s); }
-    s.x += (p.x - s.x) * .35; s.y += (p.y - s.y) * .35;
-    let da = p.a - s.a; while (da > Math.PI) da -= 2 * Math.PI; while (da < -Math.PI) da += 2 * Math.PI;
-    s.a += da * .35;
-    if (!p.dead) drawTank(p, s);
+    if (!s || Math.hypot(s.x - p.x, s.y - p.y) > 120) { s = { x: p.x, y: p.y, a: p.a, lx: p.x, ly: p.y }; smooth.set(p.id, s); }
+    if (p.id === me && pred) { s.x = pred.x; s.y = pred.y; s.a = pred.a; }
+    else {
+      s.x += (p.x - s.x) * Math.min(1, .35 * dt60); s.y += (p.y - s.y) * Math.min(1, .35 * dt60);
+      s.a += normA(p.a - s.a) * Math.min(1, .35 * dt60);
+    }
+    if (p.dead) { s.lx = s.x; s.ly = s.y; continue; }
+    if (Math.hypot(s.x - s.lx, s.y - s.ly) > 14) { tracks.push({ x: s.x, y: s.y, a: s.a, life: 1 }); s.lx = s.x; s.ly = s.y; }
+    if (p.hp === 1 && smokeT > .07) puff(s.x - Math.cos(s.a) * 8, s.y - Math.sin(s.a) * 8, 1, { v: .8, size: 4, grow: .15, color: '70,70,70', dec: .02 });
+    drawTank(p, s);
   }
+  if (smokeT > .07) smokeT = 0;
   for (const id of smooth.keys()) if (!ids.has(id)) smooth.delete(id);
-  // bullets
-  ctx.shadowColor = '#ffb300'; ctx.shadowBlur = 12; ctx.fillStyle = '#fff3a0';
-  for (const b of bullets) { ctx.beginPath(); ctx.arc(b.x, b.y, 4.5, 0, 7); ctx.fill(); }
+
+  // bullets (extrapolated between server updates)
+  const age = Math.min((performance.now() - bulletsAt) / 1000, .1);
+  ctx.shadowColor = '#ffb300'; ctx.shadowBlur = 12;
+  for (const b of bullets) {
+    const x = b.x + b.vx * age, y = b.y + b.vy * age;
+    ctx.strokeStyle = 'rgba(255,200,80,.5)'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x - b.vx * .03, y - b.vy * .03); ctx.stroke();
+    ctx.fillStyle = '#fff3a0'; ctx.beginPath(); ctx.arc(x, y, 4.5, 0, 7); ctx.fill();
+  }
   ctx.shadowBlur = 0;
+  drawParticles(dt60);
   ctx.restore();
 }
 requestAnimationFrame(frame);
