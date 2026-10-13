@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Beach Tanks</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #0b1f2e; overflow: hidden; font-family: "Segoe UI", system-ui, sans-serif; color: #fff; user-select: none; }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #menu { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; background: radial-gradient(circle at 50% 30%, #1d6e8c, #0b1f2e 70%); z-index: 5; }
+  .card { width: min(92vw, 420px); padding: 32px; border-radius: 22px; text-align: center; background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.2); backdrop-filter: blur(10px); box-shadow: 0 20px 60px rgba(0,0,0,.4); }
+  h1 { margin: 0 0 6px; font-size: 40px; letter-spacing: 4px; background: linear-gradient(90deg, #ffd23f, #ff8f3f); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .card p { opacity: .75; margin: 0 0 20px; }
+  input { width: 100%; padding: 13px 16px; border-radius: 12px; border: 1px solid rgba(255,255,255,.3); background: rgba(0,0,0,.3); color: #fff; font: inherit; font-size: 17px; text-align: center; outline: none; }
+  input:focus { border-color: #ffd23f; }
+  button { margin-top: 14px; width: 100%; padding: 14px; border: 0; border-radius: 12px; font: inherit; font-size: 18px; font-weight: 800; letter-spacing: 2px; cursor: pointer; color: #1a1200; background: linear-gradient(90deg, #ffd23f, #ff8f3f); box-shadow: 0 0 24px rgba(255,170,60,.5); }
+  button:hover { transform: scale(1.03); }
+  .help { margin-top: 18px; font-size: 13px; opacity: .75; line-height: 1.7; }
+  kbd { display: inline-block; min-width: 24px; padding: 2px 7px; border-radius: 6px; border: 1px solid rgba(255,255,255,.35); background: rgba(255,255,255,.1); }
+  #err { color: #ff8a8a; min-height: 20px; margin-top: 10px; font-size: 14px; }
+  #hud { position: absolute; top: 10px; right: 10px; min-width: 200px; padding: 10px 14px; border-radius: 14px; background: rgba(0,0,0,.45); backdrop-filter: blur(6px); font-size: 14px; z-index: 3; }
+  #hud h3 { margin: 0 0 6px; font-size: 12px; letter-spacing: 2px; opacity: .7; text-transform: uppercase; }
+  .row { display: flex; justify-content: space-between; gap: 14px; padding: 2px 0; }
+  .row .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 7px; }
+  .row.me { font-weight: 700; }
+  #feed { position: absolute; top: 10px; left: 10px; z-index: 3; font-size: 14px; }
+  #feed div { margin-bottom: 4px; padding: 5px 10px; border-radius: 8px; background: rgba(0,0,0,.45); animation: fade 5s forwards; }
+  @keyframes fade { 0%,80% { opacity: 1; } 100% { opacity: 0; } }
+  #dead { position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%); font-size: 34px; font-weight: 800; text-shadow: 0 0 20px #000; z-index: 3; display: none; text-align: center; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud"><h3>Таблица</h3><div id="board"></div></div>
+<div id="feed"></div>
+<div id="dead"></div>
+
+<div id="menu">
+  <div class="card">
+    <h1>BEACH TANKS</h1>
+    <p>Танковая битва на пляже</p>
+    <input id="name" maxlength="14" placeholder="Твой ник" autocomplete="off">
+    <button id="go">В БОЙ</button>
+    <div id="err"></div>
+    <div class="help"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> — движение<br><kbd>Пробел</kbd> — огонь<br>3 попадания — и танк уничтожен</div>
+  </div>
+</div>
+
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const $ = id => document.getElementById(id);
+let ws, me = null, map = null, players = [], bullets = [], view = {}, scale = 1, ox = 0, oy = 0;
+const smooth = new Map();                        // id -> {x,y,a} rendered pose
+const keys = { w: 0, a: 0, s: 0, d: 0, fire: 0 };
+$('name').value = localStorage.getItem('tankName') || '';
+
+function resize() {
+  cv.width = innerWidth * devicePixelRatio; cv.height = innerHeight * devicePixelRatio;
+  if (map) {
+    scale = Math.min(cv.width / map.W, cv.height / map.H);
+    ox = (cv.width - map.W * scale) / 2; oy = (cv.height - map.H * scale) / 2;
+  }
+}
+addEventListener('resize', resize);
+
+function connect() {
+  const name = $('name').value.trim();
+  localStorage.setItem('tankName', name);
+  $('err').textContent = '';
+  ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host);
+  ws.onopen = () => ws.send(JSON.stringify({ type: 'join', name }));
+  ws.onerror = () => { $('err').textContent = 'Не удалось подключиться к серверу'; };
+  ws.onclose = () => { $('menu').style.display = 'flex'; me = null; };
+  ws.onmessage = e => {
+    const m = JSON.parse(e.data);
+    if (m.type === 'init') { me = m.id; map = m; $('menu').style.display = 'none'; resize(); }
+    else if (m.type === 'state') { players = m.players; bullets = m.bullets; updateHud(); }
+    else if (m.type === 'kill') feed('💥 ' + m.killer + ' уничтожил ' + m.victim);
+    else if (m.type === 'info') feed(m.text);
+    else if (m.type === 'full') $('err').textContent = 'Сервер заполнен, попробуй позже';
+  };
+}
+$('go').onclick = connect;
+$('name').addEventListener('keydown', e => { if (e.key === 'Enter') connect(); });
+
+function feed(text) {
+  const d = document.createElement('div'); d.textContent = text; $('feed').appendChild(d);
+  setTimeout(() => d.remove(), 5000);
+  while ($('feed').children.length > 6) $('feed').firstChild.remove();
+}
+function updateHud() {
+  const sorted = [...players].sort((a, b) => b.kills - a.kills || a.deaths - b.deaths);
+  $('board').innerHTML = sorted.map(p =>
+    `<div class="row ${p.id === me ? 'me' : ''}"><span><span class="dot" style="background:${p.color}"></span>${p.name.replace(/</g, '&lt;')}</span><span>${p.kills} / ${p.deaths}</span></div>`).join('');
+  const mine = players.find(p => p.id === me);
+  $('dead').style.display = mine && mine.dead ? 'block' : 'none';
+  $('dead').textContent = 'Танк уничтожен — респавн...';
+}
+
+// ---------- input ----------
+const KEYMAP = { KeyW: 'w', KeyA: 'a', KeyS: 's', KeyD: 'd', Space: 'fire' };
+function sendInput() { if (ws && ws.readyState === 1 && me) ws.send(JSON.stringify({ type: 'input', ...keys })); }
+addEventListener('keydown', e => {
+  const k = KEYMAP[e.code];
+  if (!k || e.target.tagName === 'INPUT') return;
+  e.preventDefault();
+  if (!keys[k]) { keys[k] = 1; sendInput(); }
+});
+addEventListener('keyup', e => {
+  const k = KEYMAP[e.code];
+  if (!k) return;
+  if (keys[k]) { keys[k] = 0; sendInput(); }
+});
+addEventListener('blur', () => { for (const k in keys) keys[k] = 0; sendInput(); });
+setInterval(sendInput, 200);   // keep-alive in case a packet is lost
+
+// ---------- rendering ----------
+let sand = null, deco = [];
+function seeded(seed) { return () => (seed = (seed * 16807) % 2147483647) / 2147483647; }
+function makeDeco() {
+  const rnd = seeded(42);
+  deco = [];
+  for (let i = 0; i < 260; i++) {
+    const x = map.WATER + rnd() * (map.W - 2 * map.WATER), y = map.WATER + rnd() * (map.H - 2 * map.WATER);
+    deco.push({ x, y, r: 1 + rnd() * 2.5, c: rnd() < .5 ? 'rgba(180,140,80,.35)' : 'rgba(255,245,210,.4)' });
+  }
+  for (let i = 0; i < 6; i++) {
+    const x = map.WATER + 30 + rnd() * (map.W - 2 * map.WATER - 60), y = map.WATER + 30 + rnd() * (map.H - 2 * map.WATER - 60);
+    deco.push({ x, y, shell: true, rot: rnd() * 6 });
+  }
+}
+
+function drawBeach(t) {
+  const { W, H, WATER } = map;
+  // water
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#1b8fb5'); g.addColorStop(1, '#0f6f94');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  // wet sand + sand
+  ctx.fillStyle = '#d9b97a'; ctx.beginPath(); ctx.roundRect(WATER - 10, WATER - 10, W - 2 * WATER + 20, H - 2 * WATER + 20, 40); ctx.fill();
+  ctx.fillStyle = '#efd49a'; ctx.beginPath(); ctx.roundRect(WATER, WATER, W - 2 * WATER, H - 2 * WATER, 34); ctx.fill();
+  // animated foam
+  const f = 6 + Math.sin(t / 700) * 5;
+  ctx.strokeStyle = 'rgba(255,255,255,.65)'; ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.roundRect(WATER - 10 - f, WATER - 10 - f, W - 2 * WATER + 20 + 2 * f, H - 2 * WATER + 20 + 2 * f, 44); ctx.stroke();
+  ctx.strokeStyle = 'rgba(255,255,255,.3)'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.roundRect(WATER - 22 - f * 1.6, WATER - 22 - f * 1.6, W - 2 * WATER + 44 + 3.2 * f, H - 2 * WATER + 44 + 3.2 * f, 52); ctx.stroke();
+  // sand speckles + shells
+  for (const d of deco) {
+    if (d.shell) {
+      ctx.save(); ctx.translate(d.x, d.y); ctx.rotate(d.rot); ctx.fillStyle = '#ffd6d0';
+      ctx.beginPath(); ctx.ellipse(0, 0, 9, 6, 0, 0, 7); ctx.fill();
+      ctx.strokeStyle = '#e9a79e'; ctx.lineWidth = 1; for (let i = -2; i <= 2; i++) { ctx.beginPath(); ctx.moveTo(i * 2.5, -5); ctx.lineTo(i * 2.5, 5); ctx.stroke(); }
+      ctx.restore();
+    } else { ctx.fillStyle = d.c; ctx.beginPath(); ctx.arc(d.x, d.y, d.r, 0, 7); ctx.fill(); }
+  }
+}
+
+function drawObstacle(o) {
+  ctx.save();
+  ctx.shadowColor = 'rgba(0,0,0,.35)'; ctx.shadowBlur = 8; ctx.shadowOffsetY = 4;
+  if (o.t === 'crate') {
+    ctx.fillStyle = '#a8742f'; ctx.fillRect(o.x, o.y, o.w, o.h); ctx.shadowColor = 'transparent';
+    ctx.strokeStyle = '#6d4716'; ctx.lineWidth = 3; ctx.strokeRect(o.x + 2, o.y + 2, o.w - 4, o.h - 4);
+    ctx.beginPath(); ctx.moveTo(o.x, o.y); ctx.lineTo(o.x + o.w, o.y + o.h); ctx.moveTo(o.x + o.w, o.y); ctx.lineTo(o.x, o.y + o.h); ctx.stroke();
+  } else if (o.t === 'sandbag') {
+    ctx.fillStyle = '#b79a5c'; ctx.beginPath(); ctx.roundRect(o.x, o.y, o.w, o.h, 10); ctx.fill(); ctx.shadowColor = 'transparent';
+    ctx.strokeStyle = '#7d6636'; ctx.lineWidth = 2;
+    const horiz = o.w >= o.h, n = Math.round((horiz ? o.w : o.h) / 40);
+    for (let i = 1; i < n; i++) { ctx.beginPath(); if (horiz) { ctx.moveTo(o.x + i * o.w / n, o.y + 3); ctx.lineTo(o.x + i * o.w / n, o.y + o.h - 3); } else { ctx.moveTo(o.x + 3, o.y + i * o.h / n); ctx.lineTo(o.x + o.w - 3, o.y + i * o.h / n); } ctx.stroke(); }
+    ctx.beginPath(); ctx.roundRect(o.x, o.y, o.w, o.h, 10); ctx.stroke();
+  } else { // rock
+    ctx.fillStyle = '#7b7f86'; ctx.beginPath(); ctx.roundRect(o.x, o.y, o.w, o.h, Math.min(o.w, o.h) / 2.4); ctx.fill(); ctx.shadowColor = 'transparent';
+    ctx.fillStyle = 'rgba(255,255,255,.18)'; ctx.beginPath(); ctx.roundRect(o.x + 6, o.y + 6, o.w * .55, o.h * .35, 12); ctx.fill();
+    ctx.strokeStyle = '#575a60'; ctx.lineWidth = 3; ctx.beginPath(); ctx.roundRect(o.x, o.y, o.w, o.h, Math.min(o.w, o.h) / 2.4); ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawTank(p, s) {
+  ctx.save(); ctx.translate(s.x, s.y);
+  ctx.fillStyle = 'rgba(0,0,0,.25)'; ctx.beginPath(); ctx.ellipse(3, 6, 22, 18, 0, 0, 7); ctx.fill();
+  ctx.rotate(s.a);
+  ctx.fillStyle = '#2b2b2b'; ctx.fillRect(-20, -19, 40, 9); ctx.fillRect(-20, 10, 40, 9);       // tracks
+  ctx.fillStyle = p.color; ctx.beginPath(); ctx.roundRect(-17, -12, 34, 24, 6); ctx.fill();    // hull
+  ctx.fillStyle = 'rgba(0,0,0,.25)'; ctx.fillRect(-17, 4, 34, 8);
+  ctx.fillStyle = '#333'; ctx.fillRect(4, -3.5, 26, 7);                                         // barrel
+  ctx.fillStyle = p.color; ctx.filter = 'brightness(1.2)'; ctx.beginPath(); ctx.arc(0, 0, 9, 0, 7); ctx.fill(); ctx.filter = 'none';
+  ctx.restore();
+  // name + hp bar
+  ctx.textAlign = 'center'; ctx.font = '600 13px Segoe UI, sans-serif';
+  ctx.fillStyle = 'rgba(0,0,0,.55)'; ctx.fillText(p.name, s.x + 1, s.y - 34 + 1);
+  ctx.fillStyle = p.id === me ? '#fff6b0' : '#fff'; ctx.fillText(p.name, s.x, s.y - 34);
+  ctx.fillStyle = 'rgba(0,0,0,.5)'; ctx.fillRect(s.x - 20, s.y - 29, 40, 5);
+  ctx.fillStyle = p.hp > 1 ? '#5cf08a' : '#ff5a5a'; ctx.fillRect(s.x - 20, s.y - 29, 40 * p.hp / 3, 5);
+}
+
+function frame(t) {
+  requestAnimationFrame(frame);
+  ctx.fillStyle = '#0b1f2e'; ctx.fillRect(0, 0, cv.width, cv.height);
+  if (!map) return;
+  if (!deco.length) makeDeco();
+  ctx.save(); ctx.translate(ox, oy); ctx.scale(scale, scale);
+  drawBeach(t);
+  map.obstacles.forEach(drawObstacle);
+  // smooth toward server positions
+  const ids = new Set();
+  for (const p of players) {
+    ids.add(p.id);
+    let s = smooth.get(p.id);
+    if (!s || Math.hypot(s.x - p.x, s.y - p.y) > 120) { s = { x: p.x, y: p.y, a: p.a }; smooth.set(p.id, s); }
+    s.x += (p.x - s.x) * .35; s.y += (p.y - s.y) * .35;
+    let da = p.a - s.a; while (da > Math.PI) da -= 2 * Math.PI; while (da < -Math.PI) da += 2 * Math.PI;
+    s.a += da * .35;
+    if (!p.dead) drawTank(p, s);
+  }
+  for (const id of smooth.keys()) if (!ids.has(id)) smooth.delete(id);
+  // bullets
+  ctx.shadowColor = '#ffb300'; ctx.shadowBlur = 12; ctx.fillStyle = '#fff3a0';
+  for (const b of bullets) { ctx.beginPath(); ctx.arc(b.x, b.y, 4.5, 0, 7); ctx.fill(); }
+  ctx.shadowBlur = 0;
+  ctx.restore();
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
