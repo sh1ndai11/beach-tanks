@@ -19,9 +19,15 @@
   .help { margin-top: 18px; font-size: 13px; opacity: .75; line-height: 1.7; }
   kbd { display: inline-block; min-width: 24px; padding: 2px 7px; border-radius: 6px; border: 1px solid rgba(255,255,255,.35); background: rgba(255,255,255,.1); }
   #err { color: #ff8a8a; min-height: 20px; margin-top: 10px; font-size: 14px; }
-  #hud { position: absolute; top: 10px; right: 10px; min-width: 200px; padding: 10px 14px; border-radius: 14px; background: rgba(0,0,0,.45); backdrop-filter: blur(6px); font-size: 14px; z-index: 3; }
-  #hud h3 { margin: 0 0 6px; font-size: 12px; letter-spacing: 2px; opacity: .7; text-transform: uppercase; }
-  .row { display: flex; justify-content: space-between; gap: 14px; padding: 2px 0; }
+  #hud { position: absolute; top: 12px; right: 12px; min-width: 250px; padding: 12px 16px; border-radius: 16px; background: rgba(8,16,26,.72); border: 1px solid rgba(255,255,255,.18); box-shadow: 0 6px 24px rgba(0,0,0,.4); backdrop-filter: blur(6px); font-size: 15px; z-index: 3; }
+  #hud h3 { margin: 0 0 8px; font-size: 13px; letter-spacing: 2px; color: #ffd23f; text-transform: uppercase; text-align: center; }
+  .row { display: flex; justify-content: space-between; align-items: center; gap: 14px; padding: 3px 0; }
+  .row.head { font-size: 11px; letter-spacing: 1px; text-transform: uppercase; opacity: .55; border-bottom: 1px solid rgba(255,255,255,.15); margin-bottom: 3px; }
+  .row i { display: inline-block; width: 18px; font-style: normal; opacity: .5; }
+  .nums { display: flex; gap: 0; }
+  .nums span { width: 56px; text-align: right; }
+  .nums .k { color: #5cf08a; font-weight: 800; }
+  .row.me { background: rgba(255,255,255,.1); border-radius: 8px; padding-left: 4px; padding-right: 4px; }
   .row .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 7px; }
   .row.me { font-weight: 700; }
   #feed { position: absolute; top: 10px; left: 10px; z-index: 3; font-size: 14px; }
@@ -36,7 +42,7 @@
 </head>
 <body>
 <canvas id="c"></canvas>
-<div id="hud"><h3>До 20 фрагов · убито / смертей</h3><div id="board"></div></div>
+<div id="hud"><h3>🏆 Счёт · до 20 фрагов</h3><div id="board"></div></div>
 <div id="feed"></div>
 <div id="dead"></div>
 <div id="buffs"></div>
@@ -109,8 +115,8 @@ function feed(text) {
 }
 function updateHud() {
   const sorted = [...players].sort((a, b) => b.kills - a.kills || a.deaths - b.deaths);
-  $('board').innerHTML = sorted.map(p =>
-    `<div class="row ${p.id === me ? 'me' : ''}"><span><span class="dot" style="background:${p.color}"></span>${p.name.replace(/</g, '&lt;')}</span><span>${p.kills} / ${p.deaths}</span></div>`).join('');
+  $('board').innerHTML = `<div class="row head"><span>Игрок</span><span class="nums"><span>Фраги</span><span>Смерти</span></span></div>` + sorted.map((p, n) =>
+    `<div class="row ${p.id === me ? 'me' : ''}"><span class="nm"><i>${n + 1}</i><span class="dot" style="background:${p.color}"></span>${p.name.replace(/</g, '&lt;')}</span><span class="nums"><span class="k">${p.kills}</span><span>${p.deaths}</span></span></div>`).join('');
   const mine = players.find(p => p.id === me);
   const buffs = [];
   if (mine && !mine.dead) {
