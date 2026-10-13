@@ -47,6 +47,8 @@ const COLORS = ['#ff5a5a', '#4da3ff', '#ffd23f', '#a76bff', '#39d98a', '#ff8f3f'
 const players = new Map();   // id -> player (humans and bots)
 let bullets = [];
 let crates = [], nextCrate = 1, nextDrop = 0;
+const WIN_KILLS = 20, INTERMISSION = 7000;
+let roundOverUntil = 0;       // while > now: round is over, shooting is off, winner banner is shown
 const DROP_EVERY = 30000, FALL_MS = 1800, POWER_TIME = 15000;
 const POWER_TYPES = ['double', 'triple', 'shield'];
 const POWER_NAMES = { double: 'двойной урон', triple: 'тройной выстрел', shield: 'щит' };
@@ -63,6 +65,21 @@ function circleHitsRect(cx, cy, r, o) {
 function blocked(x, y, r) {
   if (x - r < WATER || y - r < WATER || x + r > W - WATER || y + r > H - WATER) return true;
   return OBSTACLES.some(o => circleHitsRect(x, y, r, o));
+}
+// what did a bullet hit? (for material-specific effects on the client)
+function hitMaterial(x, y) {
+  const o = OBSTACLES.find(o => x > o.x - 4 && x < o.x + o.w + 4 && y > o.y - 4 && y < o.y + o.h + 4);
+  return o ? o.t : 'water';
+}
+function resetRound() {
+  roundOverUntil = 0;
+  bullets = []; crates = []; nextDrop = 0;
+  for (const p of players.values()) {
+    p.kills = 0; p.deaths = 0; p.hp = MAX_HP; p.dead = false; p.shield = false;
+    p.doubleUntil = p.tripleUntil = 0; p.cd = 0;
+    const sp = spawnPoint(); p.x = sp.x; p.y = sp.y;
+  }
+  broadcast({ type: 'newround' });
 }
 function lineClear(x1, y1, x2, y2) {
   const d = Math.hypot(x2 - x1, y2 - y1), n = Math.ceil(d / 12);
@@ -161,6 +178,8 @@ function botThink(b) {
 
 // ---------- simulation ----------
 function update(dt) {
+  if (roundOverUntil && Date.now() >= roundOverUntil) resetRound();
+  const over = roundOverUntil > 0;
   for (const p of players.values()) {
     if (p.dead) {
       if (Date.now() >= p.respawnAt) {
@@ -192,7 +211,7 @@ function update(dt) {
       }
     }
     p.cd = Math.max(0, p.cd - dt);
-    if (i.fire && p.cd === 0) {
+    if (i.fire && p.cd === 0 && !over) {
       p.cd = COOLDOWN;
       const mx = p.x + Math.cos(p.a) * (R + 6), my = p.y + Math.sin(p.a) * (R + 6);
       const now = Date.now(), dmg = p.doubleUntil > now ? 2 : 1;
@@ -220,7 +239,7 @@ function update(dt) {
   const now2 = Date.now();
   if ([...players.values()].some(p => !p.bot)) {
     if (!nextDrop) nextDrop = now2 + 8000;               // first drop soon after the first player joins
-    if (now2 >= nextDrop && crates.length < 5) {
+    if (now2 >= nextDrop && crates.length < 5 && !roundOverUntil) {
       nextDrop = now2 + DROP_EVERY;
       for (let n = 0; n < 50; n++) {
         const x = WATER + 60 + Math.random() * (W - 2 * WATER - 120), y = WATER + 60 + Math.random() * (H - 2 * WATER - 120);
@@ -237,7 +256,7 @@ function update(dt) {
     let dead = false;
     for (let s = 0; s < 3 && !dead; s++) {          // sub-step so fast bullets don't tunnel
       b.x += (b.vx * dt) / 3; b.y += (b.vy * dt) / 3;
-      if (blocked(b.x, b.y, 3)) { dead = true; fxQueue.push({ k: 'wall', x: Math.round(b.x), y: Math.round(b.y) }); break; }
+      if (blocked(b.x, b.y, 3)) { dead = true; fxQueue.push({ k: 'wall', x: Math.round(b.x), y: Math.round(b.y), m: hitMaterial(b.x, b.y) }); break; }
       for (const p of players.values()) {
         if (p.dead || p.id === b.owner) continue;
         if (Math.hypot(p.x - b.x, p.y - b.y) < R + 3) {
@@ -254,6 +273,11 @@ function update(dt) {
             p.shield = false; p.doubleUntil = p.tripleUntil = 0;
             const killer = players.get(b.owner);
             if (killer) killer.kills++;
+            if (killer && killer.kills >= WIN_KILLS && !roundOverUntil) {
+              roundOverUntil = Date.now() + INTERMISSION;
+              bullets = []; crates = [];
+              broadcast({ type: 'win', name: killer.name, ms: INTERMISSION });
+            }
             fxQueue.push({ k: 'boom', x: Math.round(p.x), y: Math.round(p.y), c: p.color });
             broadcast({ type: 'kill', killer: killer ? killer.name : '?', victim: p.name });
           }
@@ -264,7 +288,7 @@ function update(dt) {
     b.life -= dt;
     if (!dead && b.life > 0) alive.push(b);
   }
-  bullets = alive;
+  bullets = roundOverUntil ? [] : alive;
 }
 
 // ---------- network ----------

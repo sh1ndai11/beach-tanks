@@ -29,15 +29,18 @@
   @keyframes fade { 0%,80% { opacity: 1; } 100% { opacity: 0; } }
   #buffs { position: absolute; bottom: 14px; left: 50%; transform: translateX(-50%); display: flex; gap: 8px; z-index: 3; }
   #buffs span { padding: 6px 12px; border-radius: 10px; border: 2px solid; background: rgba(0,0,0,.55); font-weight: 700; font-size: 14px; }
+  #winner { position: absolute; left: 50%; top: 30%; transform: translate(-50%,-50%); z-index: 4; display: none; text-align: center; font-size: 44px; font-weight: 800; padding: 22px 40px; border-radius: 20px; background: rgba(0,0,0,.65); border: 2px solid #ffd23f; color: #ffd23f; text-shadow: 0 0 20px rgba(255,210,63,.6); }
+  #winner small { display: block; margin-top: 8px; font-size: 18px; color: #fff; font-weight: 600; text-shadow: none; }
   #dead { position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%); font-size: 34px; font-weight: 800; text-shadow: 0 0 20px #000; z-index: 3; display: none; text-align: center; }
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
-<div id="hud"><h3>Таблица</h3><div id="board"></div></div>
+<div id="hud"><h3>До 20 фрагов · убито / смертей</h3><div id="board"></div></div>
 <div id="feed"></div>
 <div id="dead"></div>
 <div id="buffs"></div>
+<div id="winner"></div>
 
 <div id="menu">
   <div class="card">
@@ -83,6 +86,14 @@ function connect() {
       players = m.players; bullets = m.bullets; crates = m.crates; bulletsAt = performance.now();
       m.fx.forEach(handleFx); updateHud();
     }
+    else if (m.type === 'win') {
+      $('winner').innerHTML = `🏆 ${m.name.replace(/</g, '&lt;')} победил!<small>Новый раунд через <b id="cd">${Math.round(m.ms / 1000)}</b> с</small>`;
+      $('winner').style.display = 'block';
+      let left = Math.round(m.ms / 1000);
+      clearInterval(window.cdTimer);
+      window.cdTimer = setInterval(() => { left--; const e = $('cd'); if (e) e.textContent = Math.max(left, 0); if (left <= 0) clearInterval(window.cdTimer); }, 1000);
+    }
+    else if (m.type === 'newround') { $('winner').style.display = 'none'; feed('🔄 Новый раунд! Счёт обнулён'); }
     else if (m.type === 'kill') feed('💥 ' + m.killer + ' уничтожил ' + m.victim);
     else if (m.type === 'info') feed(m.text);
     else if (m.type === 'full') $('err').textContent = 'Сервер заполнен, попробуй позже';
@@ -272,7 +283,7 @@ function drawMinimap() {
 function puff(x, y, n, o) {
   for (let i = 0; i < n; i++) {
     const a = Math.random() * 6.283, v = (o.v || 2) * (.3 + Math.random());
-    particles.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 1, dec: o.dec || .04, size: o.size || 3, grow: o.grow || 0, color: o.color, glow: o.glow });
+    particles.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 1, dec: o.dec || .04, size: o.size || 3, grow: o.grow || 0, color: o.color, glow: o.glow, line: o.line, g: o.g || 0 });
   }
 }
 function handleFx(f) {
@@ -281,7 +292,21 @@ function handleFx(f) {
     puff(f.x, f.y, 5, { v: 2.5, size: 2.5, color: '255,200,80', dec: .09, glow: true });
     puff(f.x, f.y, 3, { v: .8, size: 5, grow: .25, color: '200,200,200', dec: .03 });
   } else if (f.k === 'wall') {
-    puff(f.x, f.y, 8, { v: 3, size: 2.5, color: '230,200,140', dec: .06 });
+    // different impact for each material
+    if (f.m === 'rock') {            // stone: grey chips, hot sparks, dust
+      puff(f.x, f.y, 7, { v: 4, size: 2.6, color: '140,142,150', dec: .05, g: .15 });
+      puff(f.x, f.y, 6, { v: 7, size: 1.6, color: '255,225,140', dec: .09, glow: true, line: true });
+      puff(f.x, f.y, 3, { v: 1, size: 6, grow: .3, color: '170,170,170', dec: .035 });
+    } else if (f.m === 'crate') {    // wood: splinters and a little dust
+      puff(f.x, f.y, 9, { v: 5, size: 2, color: '176,122,58', dec: .045, line: true });
+      puff(f.x, f.y, 4, { v: 2, size: 2.5, color: '120,80,40', dec: .05, g: .1 });
+    } else if (f.m === 'sandbag') {  // sand: soft burst of grains
+      puff(f.x, f.y, 14, { v: 3.5, size: 2.2, color: '224,190,120', dec: .04, g: .12 });
+      puff(f.x, f.y, 3, { v: .8, size: 8, grow: .45, color: '215,185,125', dec: .03 });
+    } else {                          // water: blue splash and ripple
+      puff(f.x, f.y, 12, { v: 4, size: 2.4, color: '150,215,255', dec: .05, g: .2 });
+      particles.push({ x: f.x, y: f.y, vx: 0, vy: 0, life: 1, dec: .04, size: 4, grow: 2.2, ring: true, rc: '180,230,255' });
+    }
   } else if (f.k === 'pickup') {
     puff(f.x, f.y, 18, { v: 4, size: 3, color: f.t === 'double' ? '255,90,60' : f.t === 'triple' ? '77,163,255' : '57,217,138', dec: .035, glow: true });
     particles.push({ x: f.x, y: f.y, vx: 0, vy: 0, life: 1, dec: .05, size: 8, grow: 4, ring: true });
@@ -320,8 +345,16 @@ function drawParticles(dt60) {
     p.life -= p.dec * dt60; p.size += p.grow * dt60;
     if (p.life <= 0) continue;
     if (p.ring) {
-      ctx.strokeStyle = `rgba(255,220,120,${p.life})`; ctx.lineWidth = 3;
+      ctx.strokeStyle = `rgba(${p.rc || '255,220,120'},${p.life})`; ctx.lineWidth = 3;
       ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, 7); ctx.stroke();
+      continue;
+    }
+    if (p.g) p.vy += p.g * dt60;
+    if (p.line) {   // splinters / sparks drawn as short streaks
+      ctx.strokeStyle = `rgba(${colorToRgb(p.color)},${p.life})`; ctx.lineWidth = p.size;
+      if (p.glow) { ctx.shadowColor = `rgb(${p.color})`; ctx.shadowBlur = 8; }
+      ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(p.x - p.vx * 2.5, p.y - p.vy * 2.5); ctx.stroke();
+      ctx.shadowBlur = 0;
       continue;
     }
     ctx.fillStyle = `rgba(${colorToRgb(p.color)},${p.life * (p.grow ? .55 : 1)})`;
@@ -411,9 +444,20 @@ function frame(t) {
   ctx.shadowColor = '#ffb300'; ctx.shadowBlur = 12;
   for (const b of bullets) {
     const x = b.x + b.vx * age, y = b.y + b.vy * age;
-    ctx.strokeStyle = 'rgba(255,200,80,.5)'; ctx.lineWidth = 3;
-    ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x - b.vx * .03, y - b.vy * .03); ctx.stroke();
-    ctx.fillStyle = b.d > 1 ? '#ff7a45' : '#fff3a0'; ctx.beginPath(); ctx.arc(x, y, b.d > 1 ? 6.5 : 4.5, 0, 7); ctx.fill();
+    const big = b.d > 1, ang = Math.atan2(b.vy, b.vx), sc = big ? 1.4 : 1;
+    // tracer streak
+    const tg = ctx.createLinearGradient(x, y, x - b.vx * .05, y - b.vy * .05);
+    tg.addColorStop(0, big ? 'rgba(255,110,50,.7)' : 'rgba(255,210,100,.6)'); tg.addColorStop(1, 'rgba(255,200,80,0)');
+    ctx.strokeStyle = tg; ctx.lineWidth = 3 * sc; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x - b.vx * .05, y - b.vy * .05); ctx.stroke(); ctx.lineCap = 'butt';
+    // bullet: brass casing with a pointed tip
+    ctx.save(); ctx.translate(x, y); ctx.rotate(ang); ctx.scale(sc, sc);
+    const bg = ctx.createLinearGradient(0, -2.5, 0, 2.5);
+    bg.addColorStop(0, big ? '#ffb08a' : '#fff0b0'); bg.addColorStop(.5, big ? '#ff6a3a' : '#e8b449'); bg.addColorStop(1, big ? '#a82a10' : '#a8741f');
+    ctx.fillStyle = bg;
+    ctx.beginPath(); ctx.moveTo(-6, -2.4); ctx.lineTo(1, -2.4); ctx.quadraticCurveTo(7.5, 0, 1, 2.4); ctx.lineTo(-6, 2.4); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = 'rgba(0,0,0,.35)'; ctx.fillRect(-6, -2.4, 1.6, 4.8);   // base ring
+    ctx.restore();
   }
   ctx.shadowBlur = 0;
   crates.forEach(c => { if (c.fall > 0) drawCrate(c, t); });   // falling crates on top of everything
