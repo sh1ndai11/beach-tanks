@@ -4,36 +4,52 @@ const path = require('path');
 const { WebSocketServer } = require('ws');
 
 const PORT = process.env.PORT || 3000;
-const W = 1200, H = 800, WATER = 50;          // map size, water border width
+const W = 1800, H = 1200, WATER = 50;         // map size, water border width
 const R = 18;                                  // tank radius
 const SPEED = 190, REVERSE = 0.6, TURN = 3.3;  // px/s, reverse multiplier, rad/s
 const BULLET_SPEED = 560, BULLET_LIFE = 1.3;
-const COOLDOWN = 0.45, MAX_HP = 3, RESPAWN = 3;
+const COOLDOWN = 0.45, MAX_HP = 5, RESPAWN = 3;
 const TICK = 1 / 60, SEND_EVERY = 2;           // 60 Hz sim, 30 Hz network
 const MIN_TANKS = 0;                           // bots fill the arena up to this many tanks (0 = no bots)
 const BOT_NAMES = ['Краб', 'Чайка', 'Пират', 'Волна', 'Акула', 'Пальма', 'Медуза', 'Дельфин'];
 
 // Cover on the beach: crates, sandbags, rocks (axis-aligned rectangles)
 const OBSTACLES = [
-  { x: 560, y: 340, w: 80, h: 120, t: 'rock' },
-  { x: 220, y: 160, w: 120, h: 40, t: 'sandbag' },
-  { x: 860, y: 600, w: 120, h: 40, t: 'sandbag' },
-  { x: 220, y: 600, w: 40, h: 120, t: 'sandbag' },
-  { x: 940, y: 80, w: 40, h: 120, t: 'sandbag' },
-  { x: 140, y: 360, w: 60, h: 60, t: 'crate' },
-  { x: 1000, y: 380, w: 60, h: 60, t: 'crate' },
-  { x: 400, y: 250, w: 50, h: 50, t: 'crate' },
-  { x: 750, y: 500, w: 50, h: 50, t: 'crate' },
-  { x: 400, y: 520, w: 70, h: 70, t: 'rock' },
-  { x: 730, y: 210, w: 70, h: 70, t: 'rock' },
-  { x: 520, y: 110, w: 160, h: 36, t: 'sandbag' },
-  { x: 520, y: 654, w: 160, h: 36, t: 'sandbag' },
+  { x: 840, y: 500, w: 120, h: 200, t: 'rock' },
+  { x: 300, y: 300, w: 90, h: 90, t: 'rock' },
+  { x: 1410, y: 810, w: 90, h: 90, t: 'rock' },
+  { x: 300, y: 810, w: 90, h: 90, t: 'rock' },
+  { x: 1410, y: 300, w: 90, h: 90, t: 'rock' },
+  { x: 500, y: 150, w: 200, h: 40, t: 'sandbag' },
+  { x: 1100, y: 1010, w: 200, h: 40, t: 'sandbag' },
+  { x: 1100, y: 150, w: 200, h: 40, t: 'sandbag' },
+  { x: 500, y: 1010, w: 200, h: 40, t: 'sandbag' },
+  { x: 780, y: 330, w: 240, h: 40, t: 'sandbag' },
+  { x: 780, y: 830, w: 240, h: 40, t: 'sandbag' },
+  { x: 200, y: 540, w: 40, h: 160, t: 'sandbag' },
+  { x: 1560, y: 500, w: 40, h: 160, t: 'sandbag' },
+  { x: 640, y: 480, w: 40, h: 240, t: 'sandbag' },
+  { x: 1120, y: 480, w: 40, h: 240, t: 'sandbag' },
+  { x: 160, y: 200, w: 60, h: 60, t: 'crate' },
+  { x: 1580, y: 940, w: 60, h: 60, t: 'crate' },
+  { x: 160, y: 940, w: 60, h: 60, t: 'crate' },
+  { x: 1580, y: 200, w: 60, h: 60, t: 'crate' },
+  { x: 560, y: 330, w: 56, h: 56, t: 'crate' },
+  { x: 1184, y: 814, w: 56, h: 56, t: 'crate' },
+  { x: 1184, y: 330, w: 56, h: 56, t: 'crate' },
+  { x: 560, y: 814, w: 56, h: 56, t: 'crate' },
+  { x: 860, y: 150, w: 60, h: 60, t: 'crate' },
+  { x: 860, y: 990, w: 60, h: 60, t: 'crate' },
 ];
 
 const COLORS = ['#ff5a5a', '#4da3ff', '#ffd23f', '#a76bff', '#39d98a', '#ff8f3f', '#ff6bd6', '#3fe0e0'];
 
 const players = new Map();   // id -> player (humans and bots)
 let bullets = [];
+let crates = [], nextCrate = 1, nextDrop = 0;
+const DROP_EVERY = 30000, FALL_MS = 1800, POWER_TIME = 15000;
+const POWER_TYPES = ['double', 'triple', 'shield'];
+const POWER_NAMES = { double: 'двойной урон', triple: 'тройной выстрел', shield: 'щит' };
 let fxQueue = [];
 let nextId = 1, tickCount = 0;
 
@@ -81,7 +97,7 @@ function makeTank(name, ws, bot) {
   const p = {
     id, ws, bot, color, name,
     x: sp.x, y: sp.y, a: Math.random() * Math.PI * 2, hp: MAX_HP, dead: false, respawnAt: 0,
-    kills: 0, deaths: 0, cd: 0, input: { w: 0, a: 0, s: 0, d: 0, fire: 0 },
+    kills: 0, deaths: 0, cd: 0, shield: false, doubleUntil: 0, tripleUntil: 0, input: { w: 0, a: 0, s: 0, d: 0, fire: 0 },
     ai: { evadeT: 0, evadeDir: 1, back: 0, checkT: 0, lx: sp.x, ly: sp.y },
   };
   players.set(id, p);
@@ -179,10 +195,42 @@ function update(dt) {
     if (i.fire && p.cd === 0) {
       p.cd = COOLDOWN;
       const mx = p.x + Math.cos(p.a) * (R + 6), my = p.y + Math.sin(p.a) * (R + 6);
-      bullets.push({ owner: p.id, x: mx, y: my, vx: Math.cos(p.a) * BULLET_SPEED, vy: Math.sin(p.a) * BULLET_SPEED, life: BULLET_LIFE });
+      const now = Date.now(), dmg = p.doubleUntil > now ? 2 : 1;
+      const angles = p.tripleUntil > now ? [p.a - 0.2, p.a, p.a + 0.2] : [p.a];
+      for (const ang of angles) {
+        bullets.push({ owner: p.id, dmg, x: mx, y: my, vx: Math.cos(ang) * BULLET_SPEED, vy: Math.sin(ang) * BULLET_SPEED, life: BULLET_LIFE });
+      }
       fxQueue.push({ k: 'shot', x: Math.round(mx), y: Math.round(my), a: +p.a.toFixed(2) });
     }
+    // pick up landed power-up crates
+    for (let ci = crates.length - 1; ci >= 0; ci--) {
+      const c = crates[ci];
+      if (c.landAt > Date.now() || Math.hypot(p.x - c.x, p.y - c.y) > R + 18) continue;
+      const now = Date.now();
+      if (c.type === 'double') p.doubleUntil = now + POWER_TIME;
+      else if (c.type === 'triple') p.tripleUntil = now + POWER_TIME;
+      else p.shield = true;
+      crates.splice(ci, 1);
+      fxQueue.push({ k: 'pickup', x: Math.round(c.x), y: Math.round(c.y), t: c.type });
+      broadcast({ type: 'info', text: '⚡ ' + p.name + ' взял ' + POWER_NAMES[c.type] });
+    }
   }
+
+  // every 30 s a crate drops from the sky (only while someone is playing)
+  const now2 = Date.now();
+  if ([...players.values()].some(p => !p.bot)) {
+    if (!nextDrop) nextDrop = now2 + 8000;               // first drop soon after the first player joins
+    if (now2 >= nextDrop && crates.length < 5) {
+      nextDrop = now2 + DROP_EVERY;
+      for (let n = 0; n < 50; n++) {
+        const x = WATER + 60 + Math.random() * (W - 2 * WATER - 120), y = WATER + 60 + Math.random() * (H - 2 * WATER - 120);
+        if (blocked(x, y, 40)) continue;
+        crates.push({ id: nextCrate++, x: Math.round(x), y: Math.round(y), type: POWER_TYPES[Math.floor(Math.random() * 3)], landAt: now2 + FALL_MS });
+        broadcast({ type: 'info', text: '📦 С неба падает ящик с улучшением!' });
+        break;
+      }
+    }
+  } else { nextDrop = 0; crates = []; }
 
   const alive = [];
   for (const b of bullets) {
@@ -194,10 +242,16 @@ function update(dt) {
         if (p.dead || p.id === b.owner) continue;
         if (Math.hypot(p.x - b.x, p.y - b.y) < R + 3) {
           dead = true;
-          p.hp--;
+          if (p.shield) {                              // shield soaks up one bullet
+            p.shield = false;
+            fxQueue.push({ k: 'shield', x: Math.round(b.x), y: Math.round(b.y), id: p.id });
+            break;
+          }
+          p.hp -= b.dmg;
           fxQueue.push({ k: 'hit', x: Math.round(b.x), y: Math.round(b.y), id: p.id });
           if (p.hp <= 0) {
             p.dead = true; p.deaths++; p.respawnAt = Date.now() + RESPAWN * 1000;
+            p.shield = false; p.doubleUntil = p.tripleUntil = 0;
             const killer = players.get(b.owner);
             if (killer) killer.kills++;
             fxQueue.push({ k: 'boom', x: Math.round(p.x), y: Math.round(p.y), c: p.color });
@@ -218,13 +272,16 @@ function send(ws, msg) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(m
 function broadcast(msg) { for (const p of players.values()) if (!p.bot) send(p.ws, msg); }
 
 function snapshot() {
+  const now = Date.now();
   const s = {
     type: 'state',
     players: [...players.values()].map(p => ({
       id: p.id, name: p.name, color: p.color, x: Math.round(p.x), y: Math.round(p.y),
       a: +p.a.toFixed(2), hp: p.hp, dead: p.dead, kills: p.kills, deaths: p.deaths, bot: p.bot,
+      sh: p.shield ? 1 : 0, dbl: Math.max(0, Math.ceil((p.doubleUntil - now) / 1000)), tri: Math.max(0, Math.ceil((p.tripleUntil - now) / 1000)),
     })),
-    bullets: bullets.map(b => ({ x: Math.round(b.x), y: Math.round(b.y), vx: Math.round(b.vx), vy: Math.round(b.vy) })),
+    bullets: bullets.map(b => ({ x: Math.round(b.x), y: Math.round(b.y), vx: Math.round(b.vx), vy: Math.round(b.vy), d: b.dmg })),
+    crates: crates.map(c => ({ id: c.id, x: c.x, y: c.y, type: c.type, fall: Math.max(0, c.landAt - now) })),
     fx: fxQueue,
   };
   fxQueue = [];
@@ -267,7 +324,7 @@ wss.on('connection', ws => {
       // make room for the newcomer by removing a bot first
       me = makeTank(name || 'Игрок', ws, false);
       balanceBots();
-      send(ws, { type: 'init', id: me.id, W, H, WATER, R, SPEED, REVERSE, TURN, obstacles: OBSTACLES });
+      send(ws, { type: 'init', id: me.id, W, H, WATER, R, SPEED, REVERSE, TURN, MAX_HP, obstacles: OBSTACLES });
       broadcast({ type: 'info', text: me.name + ' вошёл в бой' });
     } else if (m.type === 'input' && me) {
       me.input = { w: +!!m.w, a: +!!m.a, s: +!!m.s, d: +!!m.d, fire: +!!m.fire };
