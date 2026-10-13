@@ -155,8 +155,9 @@ function update(dt) {
     }
     const i = p.input;
     // tank controls: A/D rotate the hull, W/S drive forward/back
-    p.a = normAngle(p.a + ((i.d ? 1 : 0) - (i.a ? 1 : 0)) * TURN * dt);
-    const drive = (i.w ? 1 : 0) - (i.s ? 1 : 0);
+    // humans move on their own screen and report position/angle (see 'input'); only bots are simulated here
+    if (p.bot) p.a = normAngle(p.a + ((i.d ? 1 : 0) - (i.a ? 1 : 0)) * TURN * dt);
+    const drive = p.bot ? (i.w ? 1 : 0) - (i.s ? 1 : 0) : 0;
     if (drive) {
       const sp = SPEED * (drive > 0 ? 1 : REVERSE) * dt * drive;
       const mx = Math.cos(p.a) * sp, my = Math.sin(p.a) * sp;
@@ -230,9 +231,13 @@ function snapshot() {
   return s;
 }
 
+let lastTick = Date.now();
 setInterval(() => {
+  // real elapsed time, so a slow/busy server doesn't run the game in slow motion
+  const now = Date.now(), dt = Math.min((now - lastTick) / 1000, 0.05);
+  lastTick = now;
   if (tickCount % 2 === 0) for (const p of players.values()) if (p.bot) botThink(p);
-  update(TICK);
+  update(dt);
   if (++tickCount % SEND_EVERY === 0 && players.size) broadcast(snapshot());
 }, TICK * 1000);
 
@@ -266,6 +271,14 @@ wss.on('connection', ws => {
       broadcast({ type: 'info', text: me.name + ' вошёл в бой' });
     } else if (m.type === 'input' && me) {
       me.input = { w: +!!m.w, a: +!!m.a, s: +!!m.s, d: +!!m.d, fire: +!!m.fire };
+      // accept the client's own position/angle if it is plausible (not in a wall, not teleporting)
+      const now = Date.now(), since = Math.min((now - (me.lastPos || now)) / 1000, 0.3);
+      if (!me.dead && Number.isFinite(m.x) && Number.isFinite(m.y) && Number.isFinite(m.pa)) {
+        const maxD = SPEED * since * 1.6 + 25;
+        if (Math.hypot(m.x - me.x, m.y - me.y) <= maxD && !blocked(m.x, m.y, R)) { me.x = m.x; me.y = m.y; }
+        me.a = normAngle(m.pa);
+      }
+      me.lastPos = now;
     }
   });
   ws.on('close', () => {

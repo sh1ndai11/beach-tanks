@@ -105,7 +105,12 @@ function updateHud() {
 
 // ---------- input ----------
 const KEYMAP = { KeyW: 'w', KeyA: 'a', KeyS: 's', KeyD: 'd', Space: 'fire' };
-function sendInput() { if (ws && ws.readyState === 1 && me) ws.send(JSON.stringify({ type: 'input', ...keys })); }
+function sendInput() {
+  if (!(ws && ws.readyState === 1 && me)) return;
+  const m = { type: 'input', ...keys };
+  if (pred) { m.x = Math.round(pred.x * 10) / 10; m.y = Math.round(pred.y * 10) / 10; m.pa = Math.round(pred.a * 100) / 100; }
+  ws.send(JSON.stringify(m));
+}
 addEventListener('keydown', e => {
   const k = KEYMAP[e.code];
   if (!k || e.target.tagName === 'INPUT') return;
@@ -118,7 +123,10 @@ addEventListener('keyup', e => {
   if (keys[k]) { keys[k] = 0; sendInput(); }
 });
 addEventListener('blur', () => { for (const k in keys) keys[k] = 0; sendInput(); });
-setInterval(sendInput, 200);   // keep-alive in case a packet is lost
+let idleTicks = 0;   // 30 updates/s while driving, slow keep-alive when idle
+setInterval(() => {
+  if (keys.w || keys.a || keys.s || keys.d || ++idleTicks >= 6) { idleTicks = 0; sendInput(); }
+}, 33);
 
 // ---------- rendering ----------
 let sand = null, deco = [];
@@ -287,13 +295,8 @@ function stepPred(dt, srv) {
     if (!blockedLocal(pred.x + mx, pred.y, map.R)) pred.x += mx;
     if (!blockedLocal(pred.x, pred.y + my, map.R)) pred.y += my;
   }
-  // gently pull toward the authoritative server state
-  const err = Math.hypot(srv.x - pred.x, srv.y - pred.y);
-  if (err > 70) { pred.x = srv.x; pred.y = srv.y; return; }
-  const moving = drive || keys.a || keys.d;
-  const k = (moving ? (err > 30 ? .08 : .02) : .2);
-  pred.x += (srv.x - pred.x) * k; pred.y += (srv.y - pred.y) * k;
-  if (!moving) pred.a += normA(srv.a - pred.a) * .2;
+  // the server follows our position, so only snap back if it clearly disagrees (respawn, rejected move)
+  if (Math.hypot(srv.x - pred.x, srv.y - pred.y) > 140) { pred.x = srv.x; pred.y = srv.y; }
 }
 
 let lastT = performance.now(), smokeT = 0;
